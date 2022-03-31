@@ -1,0 +1,9 @@
+body {
+  margin: 0;
+}
+
+#drop-zone {
+  border: 5px solid blue;
+  width: 200px;
+  height: 100px;
+}

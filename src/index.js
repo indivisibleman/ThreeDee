@@ -7,11 +7,82 @@ import {
 
 import './threedee.css';
 
+/*
+ * Parser
+ */
+
+class Parser {
+  constructor(rawData) {
+    this.byteArray = new Uint8Array(rawData);
+    this.cursor = 0;
+  }
+
+  readString() {
+    var string = [];
+
+    while (this.byteArray[this.cursor] != 0x0a) {
+      string.push(this.byteArray[this.cursor++]);
+    }
+
+    this.cursor++;
+
+    return String.fromCharCode.apply(null, string);
+  }
+}
+
+/**
+ * Converts an HSL color value to RGB. Conversion formula
+ * adapted from http://en.wikipedia.org/wiki/HSL_color_space.
+ * Assumes h, s, and l are contained in the set [0, 1] and
+ * returns r, g, and b in the set [0, 1].
+ *
+ * @param   {number}  h       The hue
+ * @param   {number}  s       The saturation
+ * @param   {number}  l       The lightness
+ * @return  {Array}           The RGB representation
+ */
+function hslToRgb(h, s, l) {
+  var r, g, b;
+
+  if (s == 0) {
+    r = g = b = l; // achromatic
+  } else {
+    var hue2rgb = function hue2rgb(p, q, t) {
+      if (t < 0) {
+        t += 1
+      };
+      if (t > 1) {
+        t -= 1
+      };
+      if (t < 1 / 6) {
+        return p + (q - p) * 6 * t
+      };
+      if (t < 1 / 2) {
+        return q
+      };
+      if (t < 2 / 3) {
+        return p + (q - p) * (2 / 3 - t) * 6
+      };
+      return p;
+    }
+
+    var q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    var p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1 / 3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1 / 3);
+  }
+
+  return [r, g, b];
+}
+
+var stationPoints;
+
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(75, 640 / 480, 0.1, 10000);
+const camera = new THREE.PerspectiveCamera(75, 900 / 600, 0.1, 10000);
 
 const renderer = new THREE.WebGLRenderer();
-renderer.setSize(640, 480);
+renderer.setSize(900, 600);
 var container = document.getElementById('three-dee-map');
 container.appendChild(renderer.domElement);
 
@@ -102,8 +173,10 @@ function processLabel(data, labelBuffer) {
   for (var addition = 0; addition < append; addition++) {
     labelBuffer.label.push(readByte(data));
   }
+}
 
-  console.log(String.fromCharCode.apply(null, labelBuffer.label));
+function getLabel(labelBuffer) {
+  return String.fromCharCode.apply(null, labelBuffer.label);
 }
 
 function readFile(file) {
@@ -116,11 +189,14 @@ function readFile(file) {
   const reader = new FileReader();
 
   reader.addEventListener('load', (event) => {
-    var arrayBuffer = event.target.result;
     var data = {
-      array: new Uint8Array(arrayBuffer),
+      array: new Uint8Array(event.target.result),
       cursor: 0
     };
+
+    const parser = new Parser(event.target.result);
+    console.log("Parser object, cave name: " + parser.readString());
+
     var labelBuffer = {
       label: []
     };
@@ -128,6 +204,11 @@ function readFile(file) {
     var lines = []
     var lineColours = [];
     var currentLine = -1;
+
+    var stations = new Map();
+
+    var crossSections = [];
+    var currentCrossSection = 0;
 
     var name = readStringFrom(data);
     var version = readStringFrom(data);
@@ -156,7 +237,7 @@ function readFile(file) {
       } else if (0x05 <= code && 0x0e >= code) {
         console.log("Reserved code: " + code);
       } else if (0x0f == code) {
-        console.log("Move");
+        // Move
         var newLine = [];
         var newLineColour = [];
         currentLine++;
@@ -172,63 +253,77 @@ function readFile(file) {
         lineColours.push(newLineColour);
       } else if (0x10 == code) {
         //TODO: no date data
-        console.log("No date");
       } else if (0x11 == code) {
         //TODO: date 2 byte number of days since 1900
-        console.log("Two byte date");
         moveCursor(data, 2);
       } else if (0x12 == code) {
         //TODO: date and date span, 2 byte number of days since 1900, unsigned byte number of days since date
-        console.log("Two byte date and span");
         moveCursor(data, 3);
       } else if (0x13 == code) {
         //TODO: date and date, 2 2 byte number of days since 1900
-        console.log("Two byte date start and end");
         moveCursor(data, 4);
       } else if (0x14 <= code && 0x1e >= code) {
         console.log("Reserved code: " + code);
       } else if (0x1f == code) {
         //TODO: error
-        console.log("Error");
         moveCursor(data, 20);
       } else if (0x20 <= code && 0x2f >= code) {
         console.log("Reserved code: " + code);
       } else if (0x30 <= code && 0x31 >= code) {
         //TODO: cross section, label and 2 byte LRUDs
-        console.log("Cross section data: " + code);
-        if ((code & 0x01) == 0x01) {
-          console.log("last station, ");
+        if (crossSections[currentCrossSection] === undefined) {
+          crossSections[currentCrossSection] = [];
         }
+
+        let crossSection = crossSections[currentCrossSection];
+
         processLabel(data, labelBuffer);
-        console.log("L: " + readIntegerTwoByte(data) + " R: " + readIntegerTwoByte(data) + " U: " + readIntegerTwoByte(data) + " D: " + readIntegerTwoByte(data));
+        var left = readIntegerTwoByte(data);
+        var right = readIntegerTwoByte(data);
+        var up = readIntegerTwoByte(data);
+        var down = readIntegerTwoByte(data);
+
+        crossSection.push([getLabel(labelBuffer), left, right, up, down]);
+
+        if ((code & 0x01) == 0x01) {
+          currentCrossSection++;
+        }
       } else if (0x32 <= code && 0x33 >= code) {
         //TODO: cross section, label and 4 byte LRUDs
-        console.log("Cross section data: " + code);
-        if ((code & 0x01) == 0x01) {
-          console.log("last station, ");
+        if (crossSections[currentCrossSection] === undefined) {
+          crossSections[currentCrossSection] = [];
         }
+
+        let crossSection = crossSections[currentCrossSection];
+
         processLabel(data, labelBuffer);
-        console.log("L: " + readInteger(data) + " R: " + readInteger(data) + " U: " + readInteger(data) + " D: " + readInteger(data));
+        var left = readInteger(data);
+        var right = readInteger(data);
+        var up = readInteger(data);
+        var down = readInteger(data);
+
+        crossSection.push([getLabel(labelBuffer), left, right, up, down]);
+
+        if ((code & 0x01) == 0x01) {
+          currentCrossSection++;
+        }
       } else if (0x34 <= code && 0x3f >= code) {
         console.log("Reserved code: " + code);
       } else if (0x40 <= code && 0x7f >= code) {
         //TODO: line, label and 4 byte x, y, z
-        console.log("Line data: " + code);
         if ((code & 0x01) == 0x01) {
-          console.log("above ground, ");
+          //("above ground, ");
         }
 
         if ((code & 0x02) == 0x02) {
-          console.log("duplicate, ");
+          //("duplicate, ");
         }
 
         if ((code & 0x04) == 0x04) {
-          console.log("splay, ");
+          //("splay, ");
         }
 
-        if ((code & 0x20) == 0x20) {
-          console.log("don't read label, ");
-        } else {
+        if ((code & 0x20) != 0x20) {
           processLabel(data, labelBuffer);
         }
 
@@ -240,33 +335,32 @@ function readFile(file) {
         lineColours[currentLine].push(0, 0, 0);
       } else if (0x80 <= code && 0xff >= code) {
         //TODO: label, label and 4 byte x, y, z
-        console.log("Label data: " + code);
         if ((code & 0x01) == 0x01) {
-          console.log("above ground, ");
+          //("above ground, ");
         }
 
         if ((code & 0x02) == 0x02) {
-          console.log("underground, ");
+          //("underground, ");
         }
 
         if ((code & 0x04) == 0x04) {
-          console.log("entrance, ");
+          //("entrance, ");
         }
 
         if ((code & 0x08) == 0x08) {
-          console.log("exported, ");
+          //("exported, ");
         }
 
         if ((code & 0x10) == 0x10) {
-          console.log("fixed, ");
+          //("fixed, ");
         }
 
         if ((code & 0x20) == 0x20) {
-          console.log("anonymous, ");
+          //("anonymous, ");
         }
 
         if ((code & 0x40) == 0x40) {
-          console.log("on wall, ");
+          //("on wall, ");
         }
 
         processLabel(data, labelBuffer);
@@ -275,6 +369,7 @@ function readFile(file) {
         var z = readInteger(data);
 
         rawPoints.push([x, y, z]);
+        stations.set(getLabel(labelBuffer), [x, y, z]);
       } else {
         console.log("Unhandled code: " + code);
       }
@@ -298,10 +393,10 @@ function readFile(file) {
       maxZ = Math.max(maxZ, item[2]);
     });
 
-    var scale = 200 / Math.max(maxX - minX, maxY - minY, maxZ - minZ);
-    var negX = minX + ((maxX - minX) * 0.5);
-    var negY = minY + ((maxY - minY) * 0.5);
-    var negZ = minZ + ((maxZ - minZ) * 0.5);
+    var scale = 150 / Math.max(maxX - minX, maxY - minY, maxZ - minZ);
+    var negX = (maxX + minX) * 0.5;
+    var negY = (maxY + minY) * 0.5;
+    var negZ = (maxZ + minZ) * 0.5;
 
     var negColour = minZ;
     var colourScale = maxZ - minZ;
@@ -309,19 +404,29 @@ function readFile(file) {
     var newPoints = [];
 
     rawPoints.forEach(item => {
-      newPoints.push((item[0] - negX) * scale, (item[1] - negY) * scale, (item[2] - negZ) * scale);
+      newPoints.push(item[0], item[1], item[2]);
     });
+
+    console.log(scale);
+    console.log(lines);
+    console.log(stations);
+    console.log(crossSections);
 
     var newGeometry = new THREE.BufferGeometry();
     newGeometry.setAttribute('position', new THREE.Float32BufferAttribute(newPoints, 3));
+    newGeometry.translate(-negX, -negY, -negZ);
+    newGeometry.scale(scale, scale, scale);
     var newMaterial = new THREE.PointsMaterial({
       color: 0xffffff,
       size: 2.0,
       sizeAttenuation: false
     });
 
-    var stations = new THREE.Points(newGeometry, newMaterial);
-    scene.add(stations);
+    stationPoints = new THREE.Points(newGeometry, newMaterial);
+    stationPoints.visible = false;
+    scene.add(stationPoints);
+
+    console.log(stationPoints);
 
     var lineMaterial = new THREE.LineBasicMaterial({
       vertexColors: true,
@@ -336,15 +441,13 @@ function readFile(file) {
       var lineColour = lineColours[leg];
 
       for (var station = 0; station < line.length; station += 3) {
-        var colour = (line[station + 2] - negColour) / colourScale;
+        var hue = ((line[station + 2] - negColour) / colourScale) * 0.66666667;
 
-        lineColour[station] = colour;
-        lineColour[station + 1] = 1 - colour;
-        lineColour[station + 2] = 1;
+        var rgb = hslToRgb(0.66666667 - hue, 1, 0.5);
 
-        line[station] = (line[station] - negX) * scale;
-        line[station + 1] = (line[station + 1] - negY) * scale;
-        line[station + 2] = (line[station + 2] - negZ) * scale;
+        lineColour[station] = rgb[0];
+        lineColour[station + 1] = rgb[1];
+        lineColour[station + 2] = rgb[2];
       }
     }
 
@@ -353,6 +456,8 @@ function readFile(file) {
       var lineColour = lineColours[leg];
       var lineGeometry = new THREE.BufferGeometry();
       lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(line, 3));
+      lineGeometry.translate(-negX, -negY, -negZ);
+      lineGeometry.scale(scale, scale, scale);
       lineGeometry.setAttribute('color', new THREE.Float32BufferAttribute(lineColour, 3));
       var lineData = new THREE.Line(lineGeometry, lineMaterial);
       scene.add(lineData);
@@ -361,6 +466,12 @@ function readFile(file) {
 
   reader.readAsArrayBuffer(file);
 }
+
+const stationVisibilityCheckbox = document.getElementById('station-visibility');
+
+stationVisibilityCheckbox.addEventListener('change', (event) => {
+  stationPoints.visible = event.currentTarget.checked
+});
 
 const dropZone = document.getElementById('drop-zone');
 

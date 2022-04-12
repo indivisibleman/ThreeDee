@@ -11,6 +11,7 @@ import './threedee.css';
  * Parser
  */
 
+/*
 class Parser {
   constructor(rawData) {
     this.byteArray = new Uint8Array(rawData);
@@ -27,6 +28,54 @@ class Parser {
     this.cursor++;
 
     return String.fromCharCode.apply(null, string);
+  }
+}*/
+
+class Position {
+  x;
+  y;
+  z;
+
+  constructor() {}
+
+  setPosition(x, y, z) {
+    this.x = x;
+    this.y = y;
+    this.z = z;
+  }
+}
+
+class Legs {
+  constructor(previousPosition) {
+    this.currentLeg = 0,
+      this.legs = [
+        [previousPosition.x, previousPosition.y, previousPosition.z]
+      ];
+  }
+
+  addLine(previousPosition, currentPosition) {
+    let length = this.legs[this.currentLeg].length;
+
+    if (this.legs[this.currentLeg][length - 3] === previousPosition.x &&
+      this.legs[this.currentLeg][length - 2] === previousPosition.y &&
+      this.legs[this.currentLeg][length - 1] === previousPosition.z) {
+      this.legs[this.currentLeg].push(currentPosition.x, currentPosition.y, currentPosition.z);
+    } else {
+      this.currentLeg += 1;
+
+      this.legs[this.currentLeg] = [
+        previousPosition.x,
+        previousPosition.y,
+        previousPosition.z,
+        currentPosition.x,
+        currentPosition.y,
+        currentPosition.z
+      ];
+    }
+  }
+
+  getLegs() {
+    return this.legs;
   }
 }
 
@@ -78,6 +127,14 @@ function hslToRgb(h, s, l) {
 
 var stationPoints;
 
+var surfaceVisibility = true;
+var undergroundVisibility = true;
+var duplicateVisibility = true;
+var splayVisibility = true;
+var crossSectionVisibility = false;
+var legData = new Map();
+var crossSectionData = [];
+
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, 900 / 600, 0.1, 10000);
 
@@ -102,6 +159,11 @@ function animate() {
 }
 
 animate();
+
+//const shadowTexture = new THREE.CanvasTexture(  );
+
+const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
+scene.add(directionalLight);
 
 function readStringFrom(data) {
   var string = [];
@@ -180,6 +242,17 @@ function getLabel(labelBuffer) {
 }
 
 function readFile(file) {
+  /* Clear existing surveys */
+  if (stationPoints !== undefined) {
+    stationPoints = undefined;
+  }
+
+  legData = new Map();
+
+  while (scene.children.length > 0) {
+    scene.remove(scene.children[0]);
+  }
+
   // Check if the file is an image.
   if (file.name && !file.name.endsWith('.3d')) {
     console.log('File is not 3d.', file.name, file);
@@ -194,18 +267,22 @@ function readFile(file) {
       cursor: 0
     };
 
-    const parser = new Parser(event.target.result);
-    console.log("Parser object, cave name: " + parser.readString());
+    /*const parser = new Parser(event.target.result);
+    console.log("Parser object, cave name: " + parser.readString());*/
+
+    var previousPosition = new Position();
+    var currentPosition = new Position();
 
     var labelBuffer = {
       label: []
     };
     var rawPoints = [];
-    var lines = []
-    var lineColours = [];
-    var currentLine = -1;
+
+    var legs = new Map();
 
     var stations = new Map();
+
+    crossSectionData = [];
 
     var crossSections = [];
     var currentCrossSection = 0;
@@ -238,19 +315,11 @@ function readFile(file) {
         console.log("Reserved code: " + code);
       } else if (0x0f == code) {
         // Move
-        var newLine = [];
-        var newLineColour = [];
-        currentLine++;
-
         var x = readInteger(data);
         var y = readInteger(data);
         var z = readInteger(data);
 
-        newLine.push(x, y, z);
-        newLineColour.push(0, 0, 0);
-
-        lines.push(newLine);
-        lineColours.push(newLineColour);
+        previousPosition.setPosition(x, y, z);
       } else if (0x10 == code) {
         //TODO: no date data
       } else if (0x11 == code) {
@@ -311,17 +380,18 @@ function readFile(file) {
         console.log("Reserved code: " + code);
       } else if (0x40 <= code && 0x7f >= code) {
         //TODO: line, label and 4 byte x, y, z
-        if ((code & 0x01) == 0x01) {
-          //("above ground, ");
+
+        var key = JSON.stringify({
+          underground: (code & 0x01) != 0x01,
+          duplicate: (code & 0x02) == 0x02,
+          splay: (code & 0x04) == 0x04
+        });
+
+        if (!legs.has(key)) {
+          legs.set(key, new Legs(previousPosition));
         }
 
-        if ((code & 0x02) == 0x02) {
-          //("duplicate, ");
-        }
-
-        if ((code & 0x04) == 0x04) {
-          //("splay, ");
-        }
+        var leg = legs.get(key);
 
         if ((code & 0x20) != 0x20) {
           processLabel(data, labelBuffer);
@@ -331,8 +401,11 @@ function readFile(file) {
         var y = readInteger(data);
         var z = readInteger(data);
 
-        lines[currentLine].push(x, y, z);
-        lineColours[currentLine].push(0, 0, 0);
+        currentPosition.setPosition(x, y, z);
+
+        leg.addLine(previousPosition, currentPosition);
+
+        previousPosition.setPosition(x, y, z);
       } else if (0x80 <= code && 0xff >= code) {
         //TODO: label, label and 4 byte x, y, z
         if ((code & 0x01) == 0x01) {
@@ -407,11 +480,6 @@ function readFile(file) {
       newPoints.push(item[0], item[1], item[2]);
     });
 
-    console.log(scale);
-    console.log(lines);
-    console.log(stations);
-    console.log(crossSections);
-
     var newGeometry = new THREE.BufferGeometry();
     newGeometry.setAttribute('position', new THREE.Float32BufferAttribute(newPoints, 3));
     newGeometry.translate(-negX, -negY, -negZ);
@@ -426,8 +494,6 @@ function readFile(file) {
     stationPoints.visible = false;
     scene.add(stationPoints);
 
-    console.log(stationPoints);
-
     var lineMaterial = new THREE.LineBasicMaterial({
       vertexColors: true,
       linewidth: 1,
@@ -435,36 +501,372 @@ function readFile(file) {
       linejoin: 'round'
     });
 
-    //lines.forEach(line => {
-    for (var leg = 0; leg < lines.length; leg++) {
-      var line = lines[leg];
-      var lineColour = lineColours[leg];
+    var dashedLineMaterial = new THREE.LineDashedMaterial({
+      vertexColors: true,
+      dashSize: 0.4,
+      gapSize: 0.2,
+      linewidth: 1,
+      linecap: 'round',
+      linejoin: 'round'
+    });
 
-      for (var station = 0; station < line.length; station += 3) {
-        var hue = ((line[station + 2] - negColour) / colourScale) * 0.66666667;
+    legs.forEach((value, key) => {
+      let legs = value.getLegs();
+      let legProperties = JSON.parse(key);
 
-        var rgb = hslToRgb(0.66666667 - hue, 1, 0.5);
+      for (var leg = 0; leg < legs.length; leg++) {
+        let line = legs[leg];
+        let lineColour = [];
 
-        lineColour[station] = rgb[0];
-        lineColour[station + 1] = rgb[1];
-        lineColour[station + 2] = rgb[2];
+        for (var station = 0; station < line.length; station += 3) {
+          var hue = ((line[station + 2] - negColour) / colourScale) * 0.66666667;
+
+          var rgb = hslToRgb(0.66666667 - hue, 1, 0.5);
+
+          lineColour.push(rgb[0], rgb[1], rgb[2]);
+        }
+
+        var lineGeometry = new THREE.BufferGeometry();
+        lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(line, 3));
+        lineGeometry.translate(-negX, -negY, -negZ);
+        lineGeometry.scale(scale, scale, scale);
+        lineGeometry.setAttribute('color', new THREE.Float32BufferAttribute(lineColour, 3));
+
+        var lineData;
+
+        if (legProperties.duplicate) {
+          lineData = new THREE.Line(lineGeometry, dashedLineMaterial);
+          lineData.computeLineDistances();
+        } else {
+          lineData = new THREE.Line(lineGeometry, lineMaterial);
+        }
+
+        if (!legData.has(key)) {
+          legData.set(key, []);
+        }
+
+        legData.get(key).push(lineData);
+
+        scene.add(lineData);
       }
-    }
+    });
 
-    for (var leg = 0; leg < lines.length; leg++) {
-      var line = lines[leg];
-      var lineColour = lineColours[leg];
-      var lineGeometry = new THREE.BufferGeometry();
-      lineGeometry.setAttribute('position', new THREE.Float32BufferAttribute(line, 3));
-      lineGeometry.translate(-negX, -negY, -negZ);
-      lineGeometry.scale(scale, scale, scale);
-      lineGeometry.setAttribute('color', new THREE.Float32BufferAttribute(lineColour, 3));
-      var lineData = new THREE.Line(lineGeometry, lineMaterial);
-      scene.add(lineData);
-    }
+    updateVisibility();
+
+    crossSections.forEach((crossSection) => {
+      let length = crossSection.length;
+
+      var geometry = new THREE.BufferGeometry();
+
+      let faces = [];
+      let colours = [];
+
+      let v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12;
+      let previousUp, previousDown;
+
+      for (let station = 0; station < crossSection.length; station++) {
+        let up = stations.get(crossSection[station][0])[2] + crossSection[station][3];
+        let down = stations.get(crossSection[station][0])[2] - crossSection[station][4];
+        let left = [stations.get(crossSection[station][0])[0], stations.get(crossSection[station][0])[1]];
+        let right = [stations.get(crossSection[station][0])[0], stations.get(crossSection[station][0])[1]];
+
+        if (station == 0) {
+          let x = stations.get(crossSection[station + 1][0])[0] - stations.get(crossSection[station][0])[0];
+          let y = stations.get(crossSection[station + 1][0])[1] - stations.get(crossSection[station][0])[1];
+
+          let legLength = Math.sqrt((x * x) + (y * y));
+
+          if (legLength !== 0) {
+            x /= legLength;
+            y /= legLength;
+          }
+
+          let leftOffset = [crossSection[station][1] * -y, crossSection[station][1] * x];
+          let rightOffset = [crossSection[station][2] * y, crossSection[station][2] * -x];
+
+          left[0] += leftOffset[0];
+          left[1] += leftOffset[1];
+          right[0] += rightOffset[0];
+          right[1] += rightOffset[1];
+
+          v1 = [left[0], left[1], up];
+          v2 = [left[0], left[1], down];
+          v3 = [right[0], right[1], up];
+          v4 = [right[0], right[1], down];
+
+          // End cap
+          faces = faces.concat(v1);
+          faces = faces.concat(v2);
+          faces = faces.concat(v3);
+
+          faces = faces.concat(v3);
+          faces = faces.concat(v2);
+          faces = faces.concat(v4);
+
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+
+          previousUp = up;
+          previousDown = down;
+        } else if (station < crossSection.length - 2) {
+          let x1 = stations.get(crossSection[station + 1][0])[0] - stations.get(crossSection[station][0])[0];
+          let y1 = stations.get(crossSection[station + 1][0])[1] - stations.get(crossSection[station][0])[1];
+
+          let legLength1 = Math.sqrt((x1 * x1) + (y1 * y1));
+
+          if (legLength1 !== 0) {
+            x1 /= legLength1;
+            y1 /= legLength1;
+          }
+
+          let x2 = stations.get(crossSection[station][0])[0] - stations.get(crossSection[station - 1][0])[0];
+          let y2 = stations.get(crossSection[station][0])[1] - stations.get(crossSection[station - 1][0])[1];
+
+          let legLength2 = Math.sqrt((x2 * x2) + (y2 * y2));
+
+          if (legLength2 !== 0) {
+            x2 /= legLength2;
+            y2 /= legLength2;
+          }
+
+          let x = x1 + x2;
+          let y = y1 + y2;
+
+          let legLength = Math.sqrt((x * x) + (y * y));
+
+          if (legLength !== 0) {
+            x /= legLength;
+            y /= legLength;
+          }
+
+          let leftOffset = [crossSection[station][1] * -y, crossSection[station][1] * x];
+          let rightOffset = [crossSection[station][2] * y, crossSection[station][2] * -x];
+
+          left[0] += leftOffset[0];
+          left[1] += leftOffset[1];
+          right[0] += rightOffset[0];
+          right[1] += rightOffset[1];
+
+          v5 = [left[0], left[1], up];
+          v6 = [left[0], left[1], down];
+          v7 = [right[0], right[1], up];
+          v8 = [right[0], right[1], down];
+
+          // Top face
+          faces = faces.concat(v1);
+          faces = faces.concat(v3);
+          faces = faces.concat(v5);
+
+          faces = faces.concat(v3);
+          faces = faces.concat(v7);
+          faces = faces.concat(v5);
+
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          // Right face
+          faces = faces.concat(v3);
+          faces = faces.concat(v4);
+          faces = faces.concat(v7);
+
+          faces = faces.concat(v4);
+          faces = faces.concat(v8);
+          faces = faces.concat(v7);
+
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          // Bottom face
+          faces = faces.concat(v6);
+          faces = faces.concat(v8);
+          faces = faces.concat(v4);
+
+          faces = faces.concat(v6);
+          faces = faces.concat(v4);
+          faces = faces.concat(v2);
+
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+
+          // Left face
+          faces = faces.concat(v5);
+          faces = faces.concat(v2);
+          faces = faces.concat(v1);
+
+          faces = faces.concat(v5);
+          faces = faces.concat(v6);
+          faces = faces.concat(v2);
+
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+
+          v1 = v5;
+          v2 = v6;
+          v3 = v7;
+          v4 = v8;
+
+          previousUp = up;
+          previousDown = down;
+        } else {
+          let x = stations.get(crossSection[station][0])[0] - stations.get(crossSection[station - 1][0])[0];
+          let y = stations.get(crossSection[station][0])[1] - stations.get(crossSection[station - 1][0])[1];
+
+          let legLength = Math.sqrt((x * x) + (y * y));
+
+          if (legLength !== 0) {
+            x /= legLength;
+            y /= legLength;
+          }
+
+          let leftOffset = [crossSection[station][1] * -y, crossSection[station][1] * x];
+          let rightOffset = [crossSection[station][2] * y, crossSection[station][2] * -x];
+
+          left[0] += leftOffset[0];
+          left[1] += leftOffset[1];
+          right[0] += rightOffset[0];
+          right[1] += rightOffset[1];
+
+          v5 = [left[0], left[1], up];
+          v6 = [left[0], left[1], down];
+          v7 = [right[0], right[1], up];
+          v8 = [right[0], right[1], down];
+
+          // Top face
+          faces = faces.concat(v1);
+          faces = faces.concat(v3);
+          faces = faces.concat(v5);
+
+          faces = faces.concat(v3);
+          faces = faces.concat(v7);
+          faces = faces.concat(v5);
+
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          // Right face
+          faces = faces.concat(v3);
+          faces = faces.concat(v4);
+          faces = faces.concat(v7);
+
+          faces = faces.concat(v4);
+          faces = faces.concat(v8);
+          faces = faces.concat(v7);
+
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          // Bottom face
+          faces = faces.concat(v6);
+          faces = faces.concat(v8);
+          faces = faces.concat(v4);
+
+          faces = faces.concat(v6);
+          faces = faces.concat(v4);
+          faces = faces.concat(v2);
+
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+
+          // Left Face
+          faces = faces.concat(v5);
+          faces = faces.concat(v2);
+          faces = faces.concat(v1);
+
+          faces = faces.concat(v5);
+          faces = faces.concat(v6);
+          faces = faces.concat(v2);
+
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+          colours = colours.concat(colour(previousUp, negColour, colourScale));
+
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(previousDown, negColour, colourScale));
+
+          // End cap
+          faces = faces.concat(v7);
+          faces = faces.concat(v8);
+          faces = faces.concat(v5);
+
+          faces = faces.concat(v8);
+          faces = faces.concat(v6);
+          faces = faces.concat(v5);
+
+          colours = colours.concat(colour(up, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(down, negColour, colourScale));
+          colours = colours.concat(colour(up, negColour, colourScale));
+        }
+
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(faces, 3));
+        geometry.translate(-negX, -negY, -negZ);
+        geometry.scale(scale, scale, scale);
+        geometry.setAttribute('color', new THREE.Float32BufferAttribute(colours, 3));
+
+        let crossSectionDatum = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+          vertexColors: true
+        }));
+
+        crossSectionData.push(crossSectionDatum);
+
+        scene.add(crossSectionDatum);
+      }
+    });
+
+    updateCrossSectionVisiblity();
   });
 
   reader.readAsArrayBuffer(file);
+}
+
+function colour(height, negColour, colourScale) {
+  var hue = ((height - negColour) / colourScale) * 0.66666667;
+
+  return hslToRgb(0.66666667 - hue, 1, 0.5);
 }
 
 const stationVisibilityCheckbox = document.getElementById('station-visibility');
@@ -472,6 +874,75 @@ const stationVisibilityCheckbox = document.getElementById('station-visibility');
 stationVisibilityCheckbox.addEventListener('change', (event) => {
   stationPoints.visible = event.currentTarget.checked
 });
+
+const surfaceVisibilityCheckbox = document.getElementById('surface-visibility');
+
+surfaceVisibilityCheckbox.addEventListener('change', (event) => {
+  surfaceVisibility = event.currentTarget.checked;
+  updateVisibility();
+});
+
+const undergroundVisibilityCheckbox = document.getElementById('underground-visibility');
+
+undergroundVisibilityCheckbox.addEventListener('change', (event) => {
+  undergroundVisibility = event.currentTarget.checked;
+  updateVisibility();
+});
+
+const duplicateVisibilityCheckbox = document.getElementById('duplicate-visibility');
+
+duplicateVisibilityCheckbox.addEventListener('change', (event) => {
+  duplicateVisibility = event.currentTarget.checked;
+  updateVisibility();
+});
+
+const splayVisibilityCheckbox = document.getElementById('splay-visibility');
+
+splayVisibilityCheckbox.addEventListener('change', (event) => {
+  splayVisibility = event.currentTarget.checked;
+  updateVisibility();
+});
+
+function updateVisibility() {
+  legData.forEach((legs, key) => {
+    let legProperties = JSON.parse(key);
+
+    let visible = true;
+
+    if (legProperties.underground) {
+      visible = visible && undergroundVisibility;
+    } else {
+      visible = visible && surfaceVisibility;
+    }
+
+    if (legProperties.duplicate) {
+      visible = visible && duplicateVisibility;
+    }
+
+    if (legProperties.splay) {
+      visible = visible && splayVisibility;
+    }
+
+    legs.forEach((leg) => {
+      leg.visible = visible;
+    });
+
+  });
+}
+
+const crossSectionVisibilityCheckbox = document.getElementById('cross-section-visibility');
+
+crossSectionVisibilityCheckbox.addEventListener('change', (event) => {
+  crossSectionVisibility = event.currentTarget.checked;
+  updateCrossSectionVisiblity();
+});
+
+function updateCrossSectionVisiblity() {
+  crossSectionData.forEach((crossSectionDatum) => {
+    crossSectionDatum.visible = crossSectionVisibility;
+  });
+
+}
 
 const dropZone = document.getElementById('drop-zone');
 
